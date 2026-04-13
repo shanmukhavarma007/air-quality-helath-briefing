@@ -33,6 +33,8 @@
 17. [Testing Strategy](#17-testing-strategy)
 18. [Performance Considerations](#18-performance-considerations)
 19. [Roadmap](#19-roadmap)
+20. [Website Analytics](#20-website-analytics)
+21. [Google SEO Protocols](#21-google-seo-protocols)
 
 ---
 
@@ -79,6 +81,8 @@ Every external dependency in this project is free. This table is the single refe
 | Vercel | Frontend hosting | Unlimited hobby projects | No |
 | GitHub Actions | CI/CD | 2,000 minutes/month free | No |
 | Loguru + file logs | Error and application logging | Self-hosted, zero cost | No |
+| PostHog Cloud | Product analytics, session recordings, funnels, feature flags | Free up to 1M events/month | No |
+| Google Search Console | SEO indexing & performance | Free forever | No |
 
 > **OpenRouter note:** OpenRouter routes to many AI providers. Free models include
 > `google/gemma-3-27b-it:free`, `mistralai/mistral-7b-instruct:free`, and
@@ -1636,6 +1640,9 @@ Key assertions:
 - [ ] AI health briefing via OpenRouter free models (50/day hard cap enforced)
 - [ ] Morning email via Brevo (300/day)
 - [ ] AI quota banner in UI
+- [ ] PostHog Cloud initialised; `PostHogProvider` in layout, user identity on login
+- [ ] Core funnels configured: Activation, Email Retention, Briefing Engagement
+- [ ] Google Search Console verified; `sitemap.xml` and `robots.txt` live
 
 ### Phase 2 — Growth (Weeks 7–12) — Still Zero Cost
 
@@ -1644,6 +1651,8 @@ Key assertions:
 - [ ] In-app AQI threshold alerts
 - [ ] Mobile-responsive polish
 - [ ] Rule-based fallback briefing when AI quota exhausted (eliminates dependency on quota)
+- [ ] City landing pages for SEO (Visakhapatnam, Delhi, Mumbai, etc.) with structured data
+- [ ] PostHog custom events across all key actions (briefing generated, alert set, email subscribed)
 
 ### Phase 3 — Scale (Weeks 13–20) — First Optional Spend
 
@@ -1651,6 +1660,633 @@ Key assertions:
 - [ ] Brevo paid plan when user base exceeds 300 daily active emailers
 - [ ] Self-hosted push notifications via Ntfy (free, open-source)
 - [ ] Weekly PDF exposure report
+
+---
+
+## 20. Website Analytics
+
+### Philosophy — Product Analytics with PostHog
+
+This project uses **PostHog** as its analytics platform. PostHog goes well beyond page view counting — it provides session recordings, funnels, cohorts, feature flags, and A/B testing, all from a single SDK. The free cloud tier (1 million events/month) is more than sufficient for MVP and early growth stages, and a self-hosted option exists if data residency ever becomes a requirement.
+
+> **Why PostHog over Google Analytics 4?** GA4 is session-centric and optimised for marketing attribution. PostHog is product-centric — it tells you what users do inside your app (did they read the briefing? did they set an alert? where did they drop off?), which is far more actionable for a health tool with an authenticated product core.
+
+### Analytics Service Master List
+
+| Tool | Role | Cost |
+|---|---|---|
+| PostHog Cloud | Product analytics, session recording, funnels, feature flags | Free up to 1M events/month |
+| Google Search Console | Organic search impressions, CTR, indexing | Free |
+| Vercel Analytics (built-in) | Core Web Vitals (LCP, FID, CLS) | Free on hobby plan |
+
+### PostHog Setup
+
+**1. Create a free PostHog Cloud account**
+
+Sign up at [posthog.com](https://posthog.com) — no credit card required for the free tier. Create a new project and copy your **Project API Key** (format: `phc_...`) and **Host** (`https://us.i.posthog.com` for US region or `https://eu.i.posthog.com` for EU).
+
+Add to your frontend environment:
+
+```env
+# frontend/.env.local
+NEXT_PUBLIC_POSTHOG_KEY=phc_your_project_api_key
+NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
+```
+
+**2. Install the PostHog Next.js SDK**
+
+```bash
+cd frontend
+npm install posthog-js
+```
+
+**3. Create the PostHog Provider**
+
+PostHog needs to be initialised once and made available across the React tree. Use a client component provider pattern to stay compatible with Next.js App Router's server components.
+
+```typescript
+// frontend/lib/posthog.ts
+
+import posthog from 'posthog-js'
+
+export function initPostHog() {
+  if (typeof window === 'undefined') return
+
+  if (!posthog.__loaded) {
+    posthog.init(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {
+      api_host: process.env.NEXT_PUBLIC_POSTHOG_HOST,
+      person_profiles: 'identified_only',  // Only profile users who log in — saves event quota
+      capture_pageview: false,             // We'll capture manually for App Router compatibility
+      capture_pageleave: true,
+      loaded: (ph) => {
+        if (process.env.NODE_ENV === 'development') ph.debug()
+      },
+    })
+  }
+}
+
+export { posthog }
+```
+
+```typescript
+// frontend/components/providers/PostHogProvider.tsx
+'use client'
+
+import { useEffect } from 'react'
+import { usePathname, useSearchParams } from 'next/navigation'
+import { initPostHog, posthog } from '@/lib/posthog'
+
+export function PostHogProvider({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+
+  useEffect(() => {
+    initPostHog()
+  }, [])
+
+  // Manually capture page views on route change (required for App Router)
+  useEffect(() => {
+    if (pathname) {
+      let url = window.origin + pathname
+      if (searchParams?.toString()) url += `?${searchParams.toString()}`
+      posthog.capture('$pageview', { '$current_url': url })
+    }
+  }, [pathname, searchParams])
+
+  return <>{children}</>
+}
+```
+
+```typescript
+// frontend/app/layout.tsx
+
+import { Suspense } from 'react'
+import { PostHogProvider } from '@/components/providers/PostHogProvider'
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <Suspense>
+          <PostHogProvider>
+            {children}
+          </PostHogProvider>
+        </Suspense>
+      </body>
+    </html>
+  )
+}
+```
+
+**4. Identify Users on Login**
+
+Connect PostHog anonymous sessions to your authenticated users so you can track behaviour across sessions and build cohorts by health profile.
+
+```typescript
+// frontend/hooks/usePostHogIdentify.ts
+'use client'
+
+import { useEffect } from 'react'
+import { useSession } from 'next-auth/react'
+import { posthog } from '@/lib/posthog'
+
+export function usePostHogIdentify() {
+  const { data: session, status } = useSession()
+
+  useEffect(() => {
+    if (status === 'authenticated' && session?.user) {
+      posthog.identify(session.user.id, {
+        email: session.user.email,
+        // Send health profile dimensions for cohort analysis
+        // Do NOT send raw condition names if you want to avoid HIPAA-adjacent data
+        has_conditions: session.user.healthProfile?.conditions?.length > 0,
+        age_bracket: session.user.healthProfile?.age_bracket,
+        activity_level: session.user.healthProfile?.activity_level,
+      })
+    } else if (status === 'unauthenticated') {
+      posthog.reset()  // Clear identity on logout
+    }
+  }, [session, status])
+}
+```
+
+Call this hook in your root dashboard layout so it fires once after login:
+
+```typescript
+// frontend/app/dashboard/layout.tsx
+'use client'
+import { usePostHogIdentify } from '@/hooks/usePostHogIdentify'
+
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  usePostHogIdentify()
+  return <>{children}</>
+}
+```
+
+**5. Custom Event Tracking**
+
+```typescript
+// frontend/lib/analytics.ts
+// Centralised event catalogue — import this everywhere, never call posthog directly
+
+import { posthog } from './posthog'
+
+export const analytics = {
+  briefingGenerated(props: { aqi_value: number; aqi_category: string; city: string }) {
+    posthog.capture('Briefing Generated', props)
+  },
+
+  briefingShared(props: { method: 'copy_link' | 'email' | 'whatsapp' }) {
+    posthog.capture('Briefing Shared', props)
+  },
+
+  alertCreated(props: { threshold: number; pollutant: string }) {
+    posthog.capture('Alert Created', props)
+  },
+
+  emailSubscribed(props: { frequency: 'daily' | 'twice_daily' }) {
+    posthog.capture('Email Subscribed', props)
+  },
+
+  aiQuotaExhausted() {
+    posthog.capture('AI Quota Exhausted')
+  },
+
+  fallbackBriefingShown(props: { aqi_value: number }) {
+    posthog.capture('Fallback Briefing Shown', props)
+  },
+
+  locationAdded(props: { city: string; is_first_location: boolean }) {
+    posthog.capture('Location Added', props)
+  },
+
+  onboardingCompleted(props: { has_conditions: boolean; activity_level: string }) {
+    posthog.capture('Onboarding Completed', props)
+  },
+}
+```
+
+Usage example in a component:
+
+```typescript
+import { analytics } from '@/lib/analytics'
+
+// After briefing API call resolves successfully:
+analytics.briefingGenerated({
+  aqi_value: briefing.aqi_value,
+  aqi_category: briefing.category,
+  city: userLocation.city,
+})
+```
+
+**6. PostHog Feature Flags**
+
+Use feature flags to safely roll out new features to a subset of users without a redeploy.
+
+```typescript
+// Check a feature flag before rendering new UI
+import { useFeatureFlagEnabled } from 'posthog-js/react'
+
+function NewAlertUI() {
+  const isEnabled = useFeatureFlagEnabled('new-alert-threshold-ui')
+  return isEnabled ? <NewAlertForm /> : <LegacyAlertForm />
+}
+```
+
+Create flags in the PostHog dashboard under **Feature Flags → New flag**. Roll out to 10% of users first, monitor the `Alert Created` funnel, then expand to 100%.
+
+**7. Key Funnels to Build in PostHog**
+
+Configure these funnels under **Product Analytics → Funnels** in the PostHog dashboard:
+
+| Funnel | Steps | Success Signal |
+|---|---|---|
+| Activation | Signed Up → Onboarding Completed → Briefing Generated | >50% complete within 24h |
+| Email Retention | Briefing Generated → Email Subscribed | >40% |
+| Briefing Engagement | Pageview (dashboard) → Briefing Generated → Session > 2min | >55% |
+| Alert Setup | Pageview (dashboard) → Alert Created | >25% |
+
+### Key Metrics to Monitor
+
+| Metric | Target (Month 1) | PostHog Feature |
+|---|---|---|
+| Weekly Active Users | 100+ | Trends → Unique users |
+| Activation rate (briefing within 24h of signup) | >50% | Funnels |
+| Email subscription rate | >40% of registered users | Funnels |
+| Session duration on dashboard | >2 min | Session recordings |
+| AI quota exhaustion rate | <10% of sessions | Trends → `AI Quota Exhausted` |
+| Onboarding completion rate | >80% | Funnels |
+
+### Session Recordings
+
+PostHog records anonymised session replays — useful for diagnosing UX friction. Enable in **Project Settings → Session Recording**. Free tier includes recordings. Recordings of authenticated users automatically link to their PostHog profile.
+
+> **Privacy note:** PostHog masks all input fields by default. No password, health condition text, or personally typed data is captured in recordings. Verify this in your PostHog dashboard under **Session Recording → Data masking**.
+
+### Vercel Analytics — Core Web Vitals
+
+Vercel's built-in analytics tracks LCP, FID, and CLS with zero configuration on the hobby plan.
+
+```bash
+npm install @vercel/analytics @vercel/speed-insights
+```
+
+```typescript
+// frontend/app/layout.tsx (additions)
+import { Analytics } from '@vercel/analytics/react'
+import { SpeedInsights } from '@vercel/speed-insights/next'
+
+// Inside <body>, alongside PostHogProvider:
+<Analytics />
+<SpeedInsights />
+```
+
+Target Core Web Vitals thresholds for Google ranking eligibility:
+
+| Metric | Good | Needs Improvement | Poor |
+|---|---|---|---|
+| LCP (Largest Contentful Paint) | ≤ 2.5s | 2.5–4s | > 4s |
+| FID / INP (Interactivity) | ≤ 200ms | 200–500ms | > 500ms |
+| CLS (Layout Shift) | ≤ 0.1 | 0.1–0.25 | > 0.25 |
+
+---
+
+## 21. Google SEO Protocols
+
+### SEO Architecture Overview
+
+This app has two distinct content surfaces that need separate SEO strategies:
+
+**Surface A — Public marketing / city landing pages** (indexable, optimized for search)
+**Surface B — Authenticated dashboard** (behind login, not indexed, excluded from crawlers)
+
+All SEO work targets Surface A only.
+
+### robots.txt
+
+Place this at `frontend/public/robots.txt`. It blocks authenticated routes and allows everything else.
+
+```
+User-agent: *
+Allow: /
+Disallow: /dashboard/
+Disallow: /api/
+Disallow: /auth/
+
+# Sitemap location
+Sitemap: https://yourdomain.com/sitemap.xml
+```
+
+### Dynamic Sitemap
+
+Generate the sitemap dynamically using Next.js App Router's built-in sitemap support. It auto-updates when new city pages are added.
+
+```typescript
+// frontend/app/sitemap.ts
+
+import { MetadataRoute } from 'next'
+
+// Add all cities that have landing pages
+const TARGET_CITIES = [
+  { slug: 'visakhapatnam', name: 'Visakhapatnam' },
+  { slug: 'delhi',          name: 'Delhi' },
+  { slug: 'mumbai',         name: 'Mumbai' },
+  { slug: 'bangalore',      name: 'Bangalore' },
+  { slug: 'hyderabad',      name: 'Hyderabad' },
+  { slug: 'kolkata',        name: 'Kolkata' },
+]
+
+export default function sitemap(): MetadataRoute.Sitemap {
+  const baseUrl = 'https://yourdomain.com'
+  const now = new Date()
+
+  const staticPages: MetadataRoute.Sitemap = [
+    { url: baseUrl, lastModified: now, changeFrequency: 'daily', priority: 1.0 },
+    { url: `${baseUrl}/about`, lastModified: now, changeFrequency: 'monthly', priority: 0.5 },
+  ]
+
+  const cityPages: MetadataRoute.Sitemap = TARGET_CITIES.map(city => ({
+    url: `${baseUrl}/air-quality/${city.slug}`,
+    lastModified: now,
+    changeFrequency: 'hourly' as const,   // AQI data changes frequently
+    priority: 0.9,
+  }))
+
+  return [...staticPages, ...cityPages]
+}
+```
+
+### Metadata — Root Layout
+
+Set global metadata defaults in `layout.tsx`. Every page inherits these and can override.
+
+```typescript
+// frontend/app/layout.tsx
+
+import { Metadata } from 'next'
+
+export const metadata: Metadata = {
+  metadataBase: new URL('https://yourdomain.com'),
+  title: {
+    default: 'Air Quality Health Briefing — Know Your Air, Protect Your Health',
+    template: '%s | Air Quality Briefing',
+  },
+  description:
+    'Real-time air quality data fused with AI-generated health advice. ' +
+    'Know if it is safe to exercise, what mask to wear, and what symptoms to watch — ' +
+    'personalized to your health profile.',
+  keywords: [
+    'air quality', 'AQI', 'PM2.5', 'health briefing', 'air pollution India',
+    'Visakhapatnam AQI', 'Delhi air quality', 'asthma outdoor safety',
+  ],
+  authors: [{ name: 'Air Quality Briefing' }],
+  creator: 'Air Quality Briefing',
+  openGraph: {
+    type: 'website',
+    locale: 'en_IN',
+    url: 'https://yourdomain.com',
+    siteName: 'Air Quality Health Briefing',
+    title: 'Air Quality Health Briefing',
+    description: 'AI-powered daily health advice based on your local air quality.',
+    images: [{ url: '/og-default.png', width: 1200, height: 630, alt: 'Air Quality Briefing' }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Air Quality Health Briefing',
+    description: 'AI-powered daily health advice based on your local air quality.',
+    images: ['/og-default.png'],
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: { index: true, follow: true, 'max-image-preview': 'large' },
+  },
+  alternates: { canonical: 'https://yourdomain.com' },
+}
+```
+
+### City Landing Pages — Per-Page Metadata + Structured Data
+
+Each city gets a dedicated page at `/air-quality/[city]`. These pages are the primary organic traffic targets.
+
+```typescript
+// frontend/app/air-quality/[city]/page.tsx
+
+import { Metadata } from 'next'
+
+interface Props {
+  params: { city: string }
+}
+
+const CITY_META: Record<string, { name: string; state: string; lat: number; lon: number }> = {
+  visakhapatnam: { name: 'Visakhapatnam', state: 'Andhra Pradesh', lat: 17.6868, lon: 83.2185 },
+  delhi:         { name: 'Delhi',          state: 'Delhi',          lat: 28.7041, lon: 77.1025 },
+  mumbai:        { name: 'Mumbai',         state: 'Maharashtra',    lat: 19.0760, lon: 72.8777 },
+}
+
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const city = CITY_META[params.city]
+  if (!city) return {}
+
+  const title = `${city.name} Air Quality Today — AQI, PM2.5 & Health Advice`
+  const description =
+    `Live AQI for ${city.name}, ${city.state}. Real-time PM2.5, PM10, O3 levels ` +
+    `with AI-generated health guidance for outdoor activity, masks, and symptom watch.`
+
+  return {
+    title,
+    description,
+    alternates: { canonical: `https://yourdomain.com/air-quality/${params.city}` },
+    openGraph: {
+      title,
+      description,
+      url: `https://yourdomain.com/air-quality/${params.city}`,
+      images: [{ url: `/og-city-${params.city}.png`, width: 1200, height: 630 }],
+    },
+  }
+}
+
+// ── JSON-LD Structured Data ─────────────────────────────────────────────────
+// Helps Google display rich results for air quality searches
+
+function CityStructuredData({ city, aqiValue }: { city: typeof CITY_META[string]; aqiValue: number }) {
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'WebPage',
+    name: `${city.name} Air Quality`,
+    description: `Real-time AQI and health briefing for ${city.name}`,
+    about: {
+      '@type': 'Place',
+      name: city.name,
+      geo: {
+        '@type': 'GeoCoordinates',
+        latitude: city.lat,
+        longitude: city.lon,
+      },
+    },
+    // EnvironmentalObservation schema for AQI data
+    mainEntity: {
+      '@type': 'Observation',
+      name: 'Air Quality Index',
+      observationDate: new Date().toISOString(),
+      measuredProperty: {
+        '@type': 'Property',
+        name: 'Air Quality Index (US EPA)',
+      },
+      measuredValue: aqiValue,
+    },
+  }
+
+  return (
+    <script
+      type="application/ld+json"
+      dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+    />
+  )
+}
+```
+
+### FAQPage Structured Data
+
+Add an FAQ section to city pages to capture "People Also Ask" boxes in Google results.
+
+```typescript
+// Append to city page component
+
+const FAQ_ITEMS = (cityName: string) => [
+  {
+    question: `What is the AQI in ${cityName} today?`,
+    answer: `The current AQI in ${cityName} is updated every 15 minutes from the nearest OpenAQ monitoring station. Check the live gauge above for the latest reading.`,
+  },
+  {
+    question: `Is it safe to exercise outdoors in ${cityName} today?`,
+    answer: `Our AI health briefing evaluates the current AQI, PM2.5 levels, and your personal health profile to tell you whether outdoor exercise is safe, requires caution, or should be avoided.`,
+  },
+  {
+    question: `What does AQI mean for my health?`,
+    answer: `The Air Quality Index (AQI) runs from 0–500. 0–50 is Good (safe for all). 51–100 is Moderate. 101–150 is Unhealthy for Sensitive Groups. Above 150 is Unhealthy for everyone. Our briefing translates the number into specific actions.`,
+  },
+]
+
+function FAQStructuredData({ cityName }: { cityName: string }) {
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'FAQPage',
+    mainEntity: FAQ_ITEMS(cityName).map(item => ({
+      '@type': 'Question',
+      name: item.question,
+      acceptedAnswer: { '@type': 'Answer', text: item.answer },
+    })),
+  }
+
+  return (
+    <script
+      type="application/ld+json"
+      dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+    />
+  )
+}
+```
+
+### Google Search Console Setup
+
+1. Go to [search.google.com/search-console](https://search.google.com/search-console)
+2. Add property → choose **URL prefix** → enter `https://yourdomain.com`
+3. Verify ownership via the **HTML tag method** — add the meta tag to `layout.tsx`:
+
+```typescript
+export const metadata: Metadata = {
+  // ... existing metadata ...
+  verification: {
+    google: 'YOUR_GOOGLE_VERIFICATION_CODE',  // from Search Console
+  },
+}
+```
+
+4. After verification, submit your sitemap:
+   - Go to **Sitemaps** → enter `sitemap.xml` → Submit
+
+5. **Monitor weekly:**
+
+| Report | What to Watch |
+|---|---|
+| Coverage | Ensure city pages are Indexed, not Excluded |
+| Core Web Vitals | LCP < 2.5s; fix any Poor URLs before launching |
+| Search Performance | Track impressions for "AQI [city]" queries |
+| Rich Results | Verify FAQ and structured data are parsed correctly |
+
+### On-Page SEO Checklist
+
+Every city landing page must satisfy these before launch:
+
+```
+[ ] <title> contains target keyword + city name (under 60 chars)
+[ ] <meta description> 120–155 chars, includes city + AQI + action word
+[ ] H1 contains primary keyword (e.g., "Visakhapatnam Air Quality Today")
+[ ] H2s cover secondary intent (health advice, pollutant breakdown, FAQ)
+[ ] canonical URL set correctly — no trailing slash mismatch
+[ ] JSON-LD structured data validated at search.google.com/test/rich-results
+[ ] robots meta allows indexing (no accidental noindex in development)
+[ ] Open Graph image is 1200×630px, no text too close to edges
+[ ] Page loads in < 2.5s LCP on mobile (test with PageSpeed Insights)
+[ ] Internal links from homepage → each city page (crawlability)
+[ ] AQI data updates reflected in lastModified timestamp in sitemap.xml
+```
+
+### Nginx — SEO-Friendly Headers
+
+Add these headers to your `nginx.conf` for crawlability and performance signals:
+
+```nginx
+# nginx/nginx.conf (additions to the server block)
+
+server {
+  # ... existing config ...
+
+  # Canonical HTTPS redirect (avoids duplicate content)
+  if ($scheme != "https") {
+    return 301 https://$host$request_uri;
+  }
+
+  # Security + SEO headers
+  add_header X-Robots-Tag "index, follow" always;
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Content-Type-Options "nosniff" always;
+
+  # Cache static assets aggressively (improves LCP score)
+  location ~* \.(js|css|png|jpg|jpeg|webp|svg|ico|woff2)$ {
+    expires 1y;
+    add_header Cache-Control "public, immutable";
+  }
+
+  # Cache sitemap for 1 hour
+  location = /sitemap.xml {
+    expires 1h;
+    add_header Cache-Control "public";
+  }
+
+  # robots.txt is static — cache it
+  location = /robots.txt {
+    expires 7d;
+    add_header Cache-Control "public";
+  }
+}
+```
+
+### Target Keyword Strategy
+
+Focus on **informational + local intent** queries. These have high click-through rates for health and environment tools.
+
+| Primary Keyword | Monthly Volume (India) | Difficulty | Page Target |
+|---|---|---|---|
+| `visakhapatnam air quality today` | Medium | Low | `/air-quality/visakhapatnam` |
+| `delhi AQI today` | High | Medium | `/air-quality/delhi` |
+| `is it safe to run outside today [city]` | Low | Very Low | City pages + FAQ |
+| `PM2.5 health effects asthma` | Medium | Low | Blog / about page |
+| `air quality index meaning` | High | Medium | Homepage |
+| `air pollution mask recommendation India` | Low | Low | City pages |
+
+> **Programmatic SEO note:** The city landing page template scales to every city in OpenAQ's database with zero additional engineering. Each page auto-generates fresh AQI data, structured metadata, and FAQ content. A single template can cover 50+ Indian cities and rank for long-tail "air quality [city]" searches.
 
 ---
 
@@ -1699,6 +2335,23 @@ npm run dev
 # Brevo:      app.brevo.com        → emails sent today
 # OpenRouter: openrouter.ai/activity → AI requests today
 # Supabase:   supabase.com/dashboard → DB size and connections
+
+# ── Analytics & SEO setup (post-deploy) ─────────────────────
+# 1. PostHog Cloud setup (see Section 20)
+#    → Sign up at posthog.com (free, no card)
+#    → Create project → copy Project API Key (phc_...)
+#    → Add to .env.local: NEXT_PUBLIC_POSTHOG_KEY and NEXT_PUBLIC_POSTHOG_HOST
+#    → npm install posthog-js
+# 2. Submit sitemap to Google Search Console:
+#    → https://search.google.com/search-console
+#    → Add property → verify → submit https://yourdomain.com/sitemap.xml
+# 3. Validate structured data:
+#    → https://search.google.com/test/rich-results
+#    → Test a city page URL (e.g. /air-quality/visakhapatnam)
+# 4. Check Core Web Vitals:
+#    → https://pagespeed.web.dev → enter your deployed URL → target LCP < 2.5s
+# 5. Monitor PostHog:
+#    → posthog.com/dashboard → check Activation funnel daily for first 2 weeks
 ```
 
 ---
