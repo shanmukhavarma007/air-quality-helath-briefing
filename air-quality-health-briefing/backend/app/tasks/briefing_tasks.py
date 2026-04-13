@@ -9,6 +9,8 @@ from app.services.weather_service import WeatherService
 from app.services.ai_service import AIService, QuotaExhaustedException
 from app.services.aqi_calculator import get_aqi_category, PM25_BREAKPOINTS, calculate_aqi
 from app.services.email_service import EmailService
+from app.services.ntfy_service import NtfyService
+from app.services.pdf_report_service import PDFReportService
 from loguru import logger
 import redis.asyncio as aioredis
 from app.config import settings
@@ -110,6 +112,9 @@ async def _generate_daily_briefing_async(user_id: str, location_id: str):
             await db.commit()
             
             email_service = EmailService()
+            ntfy_service = NtfyService()
+            
+            # Send email briefing
             await email_service.send_briefing_email(
                 user.email,
                 user.full_name or "User",
@@ -117,7 +122,20 @@ async def _generate_daily_briefing_async(user_id: str, location_id: str):
                 aqi_value,
                 location.label
             )
+            
+            # Send push notification if AQI is above threshold
+            if aqi_value >= location.alert_threshold:
+                await ntfy_service.send_aqi_alert(
+                    user_email=user.email,
+                    user_name=user.full_name or "User",
+                    aqi_value=aqi_value,
+                    category=briefing_content.get("outdoor_safety", "Unknown"),
+                    location_label=location.label,
+                    threshold=location.alert_threshold
+                )
+            
             await email_service.close()
+            await ntfy_service.close()
             
             logger.info(f"Daily briefing generated for user {user_id}")
             

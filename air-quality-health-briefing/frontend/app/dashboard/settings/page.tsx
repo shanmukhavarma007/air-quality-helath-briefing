@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { UserLocation } from "@/types";
+import { analytics } from "@/lib/analytics";
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -44,20 +45,27 @@ export default function SettingsPage() {
       return;
     }
     setIsAdding(true);
-    try {
-      await api.post("/locations", {
-        label: newLocation.label,
-        latitude: parseFloat(newLocation.latitude),
-        longitude: parseFloat(newLocation.longitude),
-      });
-      toast.success("Location added!");
-      setNewLocation({ label: "", latitude: "", longitude: "" });
-      await loadLocations();
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || "Failed to add location");
-    } finally {
-      setIsAdding(false);
-    }
+      try {
+        await api.post("/locations", {
+          label: newLocation.label,
+          latitude: parseFloat(newLocation.latitude),
+          longitude: parseFloat(newLocation.longitude),
+        });
+        toast.success("Location added!");
+        setNewLocation({ label: "", latitude: "", longitude: "" });
+        await loadLocations();
+        
+        // Track location added event
+        const isFirstLocation = (locationsRes?.data || []).length === 0;
+        analytics.locationAdded({
+          city: newLocation.label,
+          is_first_location: isFirstLocation
+        });
+      } catch (error: any) {
+        toast.error(error.response?.data?.detail || "Failed to add location");
+      } finally {
+        setIsAdding(false);
+      }
   };
 
   const deleteLocation = async (id: string) => {

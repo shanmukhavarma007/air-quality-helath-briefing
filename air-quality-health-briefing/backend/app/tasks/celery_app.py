@@ -4,7 +4,11 @@ from app.config import settings
 celery_app = Celery(
     "air_quality_briefing",
     broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL
+    backend=settings.REDIS_URL,
+    include=[
+        'app.tasks.briefing_tasks',
+        'app.tasks.pdf_report_tasks'
+    ]
 )
 
 celery_app.conf.update(

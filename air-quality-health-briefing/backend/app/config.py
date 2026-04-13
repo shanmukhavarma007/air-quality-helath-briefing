@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     OPENAQ_API_KEY: str
     OPENROUTER_API_KEY: str
     BREVO_API_KEY: str
+    # Ntfy configuration for self-hosted push notifications
+    NTFY_SERVER_URL: str = "https://ntfy.sh"
+    NTFY_TOPIC: str = "airqualitybriefing"
+    NTFY_USERNAME: str = ""
+    NTFY_PASSWORD: str = ""
 
     APP_URL: str = "http://localhost:8000"
     ENVIRONMENT: str = "development"

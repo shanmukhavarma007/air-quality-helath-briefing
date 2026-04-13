@@ -5,8 +5,13 @@ import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Bell, Menu, User } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AlertBell } from "@/components/layout/AlertBell";
 
-export function Navbar() {
+interface NavbarProps {
+  aqiData: AQIData | null;
+}
+
+export function Navbar({ aqiData }: NavbarProps) {
   const pathname = usePathname();
 
   return (
@@ -57,7 +62,7 @@ export function Navbar() {
         </div>
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="icon">
-            <Bell className="h-5 w-5" />
+            <AlertBell aqiData={aqiData} />
           </Button>
           <Button variant="ghost" size="icon">
             <User className="h-5 w-5" />

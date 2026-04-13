@@ -6,12 +6,15 @@ import { Navbar } from "@/components/layout/Navbar";
 import { AQIGauge } from "@/components/aqi/AQIGauge";
 import { PollutantBreakdown } from "@/components/aqi/PollutantBreakdown";
 import { HourlyTrendChart } from "@/components/aqi/HourlyTrendChart";
+import { HistoricalTrendChart } from "@/components/aqi/HistoricalTrendChart";
 import { HealthBriefCard } from "@/components/briefing/HealthBriefCard";
 import { AIQuotaBanner } from "@/components/briefing/AIQuotaBanner";
+import { AlertBell } from "@/components/layout/AlertBell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import api from "@/lib/api";
+import { analytics } from "@/lib/analytics";
 import { AQIData, Briefing, QuotaStatus, UserLocation } from "@/types";
 
 export default function DashboardPage() {
@@ -79,19 +82,38 @@ export default function DashboardPage() {
 
   const generateBriefing = async () => {
     setIsGeneratingBriefing(true);
-    try {
-      const response = await api.post("/briefings/generate", {
-        location_id: selectedLocation?.id,
-      });
-      setBriefing(response.data);
-      const quotaRes = await api.get("/briefings/quota");
-      setQuota(quotaRes.data);
-      toast.success("Briefing generated!");
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || "Failed to generate briefing");
-    } finally {
-      setIsGeneratingBriefing(false);
-    }
+      try {
+        const response = await api.post("/briefings/generate", {
+          location_id: selectedLocation?.id,
+        });
+        setBriefing(response.data);
+        const quotaRes = await api.get("/briefings/quota");
+        setQuota(quotaRes.data);
+        
+        // Track briefing generation event
+        if (aqiData) {
+          analytics.briefingGenerated({
+            aqi_value: aqiData.aqi_value,
+            aqi_category: aqiData.category,
+            city: selectedLocation?.label || 'Unknown'
+          });
+        }
+        
+        if (response.data.is_cached_result) {
+          analytics.fallbackBriefingShown({
+            aqi_value: aqiData?.aqi_value || 0
+          });
+        }
+        
+        toast.success("Briefing generated!");
+      } catch (error: any) {
+        if (error.response?.status === 429 && error.isQuotaExhausted) {
+          analytics.aiQuotaExhausted();
+        }
+        toast.error(error.response?.data?.detail || "Failed to generate briefing");
+      } finally {
+        setIsGeneratingBriefing(false);
+      }
   };
 
   if (isLoading) {
@@ -104,7 +126,7 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <Navbar />
+       <Navbar aqiData={aqiData} />
       <main className="container px-4 py-8">
         <div className="flex flex-col md:flex-row gap-4 mb-6">
           <h1 className="text-2xl font-bold flex-1">Air Quality Dashboard</h1>

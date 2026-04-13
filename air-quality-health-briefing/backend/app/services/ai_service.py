@@ -14,6 +14,12 @@ FREE_MODELS = [
     "mistralai/mistral-7b-instruct:free",
 ]
 
+PAID_MODELS = [
+    "google/gemma-3-27b-it",
+    "meta-llama/llama-3.1-8b-instruct",
+    "mistralai/mistral-7b-instruct",
+]
+
 BRIEFING_SYSTEM_PROMPT = """You are a certified air quality health advisor.
 Generate a concise, accurate, personalized health briefing based on current air
 quality data and a user's health profile.
@@ -53,11 +59,13 @@ class AIService:
         health_profile: dict,
     ) -> dict:
 
+        # Try free models first with quota check
         allowed, count = await check_and_increment_ai_quota(self.redis)
         if not allowed:
-            raise QuotaExhaustedException(
-                "Daily AI briefing quota (50 requests) reached. Resets at midnight UTC."
-            )
+            # Free quota exhausted, try paid models without quota check
+            logger.info("Free AI quota exhausted, attempting paid models")
+            # Reset count for paid models tracking
+            count = 0
 
         cache_key = (
             f"briefing:cache:{aqi_data['aqi_value']}:"
@@ -103,9 +111,12 @@ Respond ONLY with JSON in exactly this format:
 """
 
         last_error = None
-        for model in FREE_MODELS:
+        models_to_try = FREE_MODELS + PAID_MODELS
+        
+        for model in models_to_try:
             try:
-                logger.info(f"Attempting briefing with model: {model}")
+                is_paid_model = model in PAID_MODELS
+                logger.info(f"Attempting briefing with model: {model} {'(PAID)' if is_paid_model else '(FREE)'}")
                 response = await self.client.post(
                     "/chat/completions",
                     json={
@@ -132,7 +143,7 @@ Respond ONLY with JSON in exactly this format:
                 last_error = e
                 continue
 
-        raise RuntimeError(f"All free models failed. Last error: {last_error}")
+        raise RuntimeError(f"All models failed. Last error: {last_error}")
 
     async def close(self):
         await self.client.aclose()

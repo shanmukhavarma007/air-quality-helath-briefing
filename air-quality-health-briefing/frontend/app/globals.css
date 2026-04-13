@@ -24,6 +24,12 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 221.2 83.2% 53.3%;
     --radius: 0.5rem;
+    
+    /* Mobile-responsive breakpoints */
+    --sm: 640px;
+    --md: 768px;
+    --lg: 1024px;
+    --xl: 1280px;
   }
 }
 
@@ -33,5 +39,22 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+  
+  /* Responsive utility classes */
+  .responsive-container {
+    @apply px-4 sm:px-6 lg:px-8;
+  }
+  
+  .responsive-grid {
+    @apply grid-cols-1 sm:grid-cols-2 lg:grid-cols-3;
+  }
+  
+  .responsive-text {
+    @apply text-base sm:text-lg lg:text-xl;
+  }
+  
+  .responsive-button {
+    @apply px-4 py-2 sm:px-6 sm:py-3 lg:px-8 lg:py-4;
   }
 }

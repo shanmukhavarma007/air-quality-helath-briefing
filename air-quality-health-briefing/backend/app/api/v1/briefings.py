@@ -20,6 +20,83 @@ router = APIRouter(prefix="/briefings", tags=["briefings"])
 cache_service = CacheService()
 
 
+def generate_rule_based_briefing(aqi_data: dict, weather_data: dict, health_profile: dict) -> dict:
+    """
+    Generate a rule-based health briefing when AI quota is exhausted.
+    Based on WHO and EPA guidelines for air quality and health.
+    """
+    aqi_value = aqi_data.get('aqi_value', 0)
+    category = aqi_data.get('category', 'Unknown')
+    pm25 = aqi_data.get('pm25', 0)
+    
+    # Determine outdoor safety based on AQI
+    if aqi_value <= 50:
+        outdoor_safety = "safe"
+    elif aqi_value <= 100:
+        outdoor_safety = "caution"
+    else:
+        outdoor_safety = "avoid"
+    
+    # Mask recommendation based on AQI and health conditions
+    mask_recommendation = None
+    conditions = health_profile.get('conditions', [])
+    activity_level = health_profile.get('activity_level', 'moderate')
+    
+    if aqi_value > 100 or ('asthma' in conditions and aqi_value > 50):
+        if aqi_value > 200:
+            mask_recommendation = "N95 or equivalent"
+        elif aqi_value > 150:
+            mask_recommendation = "Surgical or KN95"
+        else:
+            mask_recommendation = "Consider wearing a mask if sensitive"
+    
+    # Symptom watch based on conditions and AQI
+    symptom_watch = []
+    if aqi_value > 100:
+        symptom_watch.extend(["cough", "throat irritation"])
+    if aqi_value > 150:
+        symptom_watch.extend(["shortness of breath", "eye irritation"])
+    if 'asthma' in conditions and aqi_value > 50:
+        symptom_watch.extend(["wheezing", "chest tightness"])
+    if 'cardiovascular' in conditions and aqi_value > 100:
+        symptom_watch.extend(["palpitations", "unusual fatigue"])
+    
+    # Best time window based on typical daily patterns (simplified)
+    best_time_window = None
+    if aqi_value <= 100:
+        best_time_window = "06:00-09:00 (typically better air quality in morning)"
+    elif aqi_value <= 150:
+        best_time_window = "06:00-08:00 (early morning may have better conditions)"
+    
+    # Activity guidance based on safety level and health profile
+    activity_guidance = ""
+    if outdoor_safety == "safe":
+        activity_guidance = "Good day for outdoor activities. Enjoy your time outside."
+    elif outdoor_safety == "caution":
+        activity_guidance = "Limit prolonged outdoor exertion. Consider shorter activities or take frequent breaks."
+    else:
+        activity_guidance = "Avoid prolonged outdoor activities. Consider indoor alternatives for exercise."
+    
+    # Adjust activity guidance based on health profile
+    if 'asthma' in conditions and outdoor_safety != "safe":
+        activity_guidance += " Keep your inhaler accessible if you have asthma."
+    if activity_level == "athlete" and outdoor_safety == "avoid":
+        activity_guidance += " Consider indoor training or rest day."
+    
+    # Historical context (simplified)
+    historical_context = "Air quality conditions vary daily based on weather and emissions."
+    
+    return {
+        "summary": f"Air quality is {category.lower()} with an AQI of {aqi_value}. ",
+        "outdoor_safety": outdoor_safety,
+        "mask_recommendation": mask_recommendation,
+        "symptom_watch": list(set(symptom_watch)),  # Remove duplicates
+        "best_time_window": best_time_window,
+        "activity_guidance": activity_guidance.strip(),
+        "historical_context": historical_context
+    }
+
+
 async def get_redis():
     return aioredis.from_url(settings.REDIS_URL, encoding="utf-8", decode_responses=True)
 
@@ -110,24 +187,20 @@ async def generate_briefing(
             is_cached = False
             model_used = "google/gemma-3-27b-it:free"
         except QuotaExhaustedException:
-            cache_key = f"briefing:fallback:{aqi_value}"
+            # Rule-based fallback when AI quota is exhausted
+            cache_key = f"briefing:fallback:{aqi_value}:{'_'.join(sorted(health_profile.get('conditions', [])))}"
             cached = await cache_service.get(cache_key)
             if cached:
                 briefing_content = cached
                 is_cached = True
                 model_used = "cached"
             else:
-                briefing_content = {
-                    "summary": "AI quota exhausted. Please try again tomorrow.",
-                    "outdoor_safety": "caution",
-                    "mask_recommendation": None,
-                    "symptom_watch": [],
-                    "best_time_window": None,
-                    "activity_guidance": "Check local air quality reports for updates.",
-                    "historical_context": "Unable to generate historical context due to AI quota limits."
-                }
+                # Generate rule-based briefing based on AQI value and health profile
+                briefing_content = generate_rule_based_briefing(aqi_data, weather_info, health_profile)
+                # Cache the rule-based briefing for 2 hours
+                await cache_service.set(cache_key, briefing_content, ttl=7200)
                 is_cached = True
-                model_used = "fallback"
+                model_used = "rule-based"
         except Exception as e:
             logger.error(f"Briefing generation failed: {e}")
             raise HTTPException(status_code=500, detail="Failed to generate briefing")
